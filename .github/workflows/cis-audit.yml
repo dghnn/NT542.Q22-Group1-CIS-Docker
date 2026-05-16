@@ -1,7 +1,9 @@
 name: CIS Docker Audit
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   audit:
@@ -16,6 +18,10 @@ jobs:
           hostname
           whoami
           docker --version
+          
+      - name: Create .env
+        run: |
+          echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" > .env
 
       - name: Start Docker Lab
         run: |
