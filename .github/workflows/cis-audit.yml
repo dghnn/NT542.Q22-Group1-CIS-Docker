@@ -25,7 +25,7 @@ jobs:
 
       - name: Start Docker Lab
         run: |
-          docker-compose up -d --build
+          docker compose up -d --build
 
       - name: Show containers
         run: docker ps
