@@ -35,8 +35,8 @@ jobs:
           chmod +x audit/run_all.sh
           ./audit/run_all.sh
 
-      - name: Upload report
+      - name: Upload CSV Report
         uses: actions/upload-artifact@v4
         with:
-          name: cis-report
-          path: report/
+          name: cis-csv-report
+          path: report/cis_report.csv
