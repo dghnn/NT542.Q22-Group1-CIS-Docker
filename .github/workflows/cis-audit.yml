@@ -1,0 +1,30 @@
+name: CIS Docker Audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          hostname
+          whoami
+          docker --version
+
+      - name: Start Docker Lab
+        run: |
+          docker-compose up -d --build
+
+      - name: Show containers
+        run: docker ps
+
+      - name: Run CIS audit
+        run: |
+          chmod +x audit/run_all.sh
+          ./audit/run_all.sh
