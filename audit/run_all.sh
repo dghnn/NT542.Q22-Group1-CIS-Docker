@@ -1,16 +1,9 @@
 #!/bin/bash
 
-echo "===== CIS Docker Audit ====="
+echo "===== CIS DOCKER FULL AUDIT ====="
 
-echo "[CHECK] Containers running:"
-docker ps
+./audit/01-host-docker-engine-audit.sh
+./audit/02-audit-daemon-os-security.sh
+./audit/03-image-supply-chain-audit.sh
 
-echo
-echo "[CHECK] Privileged containers:"
-docker ps --quiet | xargs docker inspect \
---format '{{ .Name }}: {{ .HostConfig.Privileged }}'
-
-echo
-echo "[CHECK] no-new-privileges:"
-docker ps --quiet | xargs docker inspect \
---format '{{ .Name }}: {{ .HostConfig.SecurityOpt }}'
+echo "===== DONE ====="
