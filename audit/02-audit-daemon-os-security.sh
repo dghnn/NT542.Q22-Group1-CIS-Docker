@@ -95,8 +95,7 @@ echo
 
 # Check auditctl
 if ! command -v auditctl >/dev/null 2>&1; then
-  fail "auditctl not found. Please install auditd"
-  exit 1
+  warn "auditctl not found. auditd is not installed"
 fi
 
 # 1.1.3 - 1.1.18 Audit rules
