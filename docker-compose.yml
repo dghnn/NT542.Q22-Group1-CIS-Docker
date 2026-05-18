@@ -20,7 +20,7 @@ services:
       - ./app/src:/var/www/html
     environment:
       - DB_HOST=db
-      - DB_USER=appuser
+      - DB_USER=root
       - DB_PASS=${DB_PASSWORD}
       - DB_NAME=appdb
     security_opt:
