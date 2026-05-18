@@ -125,8 +125,10 @@ fi
 if [ -n "$RUNNING_CONTAINERS" ]; then
   for cid in $RUNNING_CONTAINERS; do
     if docker exec "$cid" sh -c "command -v apt-get >/dev/null 2>&1" 2>/dev/null; then
-      OUTDATED=$(docker exec "$cid" sh -c "apt-get update >/dev/null 2>&1 && apt-get upgrade -s | grep '^Inst' | wc -l" 2>/dev/null)
-
+      OUTDATED=$(docker exec "$cid" sh -c \
+        "apt-get update >/dev/null 2>&1 && apt-get upgrade -s 2>/dev/null | grep '^Inst' | wc -l" \
+        2>/dev/null || echo 0)
+      OUTDATED=${OUTDATED:-0}
       if [ "$OUTDATED" -eq 0 ]; then
         pass "4.4 Container $cid has no pending apt package updates"
       else
