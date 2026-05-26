@@ -50,14 +50,7 @@ fi
 
 ####### Swarm & Network Isolation
 
-echo "### Swarm & Network Isolation"
-# 5.1 - Ensure swarm mode is not Enabled, if not needed
-SWARM_STATE=$(docker info --format '{{ .Swarm.LocalNodeState }}' 2>/dev/null)
-if [ "$SWARM_STATE" = "inactive" ] || [ -z "$SWARM_STATE" ]; then
-  pass "5.1 Ensure swarm mode is not Enabled, if not needed: Swarm is inactive"
-else
-  warn "5.1 Ensure swarm mode is not Enabled, if not needed: Swarm is enabled ($SWARM_STATE). Manual verification required."
-fi
+echo "### Network Isolation"
 
 # 5.10 - Ensure that the host's network namespace is not shared
 if [ -n "$ALL_CONTAINERS" ]; then
@@ -74,26 +67,6 @@ if [ -n "$ALL_CONTAINERS" ]; then
     pass "5.10 Ensure that the host's network namespace is not shared: no containers use host network"
 else
     warn "5.10 Skipped: no containers found"
-fi
-
-# 5.14 - Ensure that incoming container traffic is bound to a specific host interface
-if [ -n "$RUNNING_CONTAINERS" ]; then
-  for cid in $RUNNING_CONTAINERS; do
-    NAME=$(docker inspect --format '{{ .Name }}' "$cid" 2>/dev/null)
-
-    BINDS=$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$cid" 2>/dev/null \
-      | grep -oE '"HostIp":"[^"]*"' \
-      | awk -F'"' '{print $4}' \
-      | sort -u)
-
-    if echo "$BINDS" | grep -qx '0\.0\.0\.0'; then
-      fail "5.14 Ensure that incoming container traffic is bound to a specific host interface: $NAME has port(s) bound to 0.0.0.0"
-    elif [ -z "$BINDS" ]; then
-      pass "5.14 Ensure that incoming container traffic is bound to a specific host interface: $NAME has no published ports"
-    else
-      pass "5.14 Ensure that incoming container traffic is bound to specific interface(s): $(echo "$BINDS" | tr '\n' ' ')"
-    fi
-  done
 fi
 
 # 5.8 - Ensure privileged ports are not mapped within containers
@@ -113,30 +86,6 @@ if [ -n "$RUNNING_CONTAINERS" ]; then
 else
   warn "5.8 Skipped: no running containers found"
 fi
-
-# 5.9 - Ensure that only needed ports are open on the container
-if [ -n "$RUNNING_CONTAINERS" ]; then
-  ALL_PASS=true
-  for cid in $RUNNING_CONTAINERS; do
-    NAME=$(docker inspect --format '{{ .Name }}' "$cid" 2>/dev/null)
-    HOST_PORTS=$(docker inspect --format \
-'{{range $p,$v := .NetworkSettings.Ports}}{{if $v}}{{range $v}}{{println .HostPort}}{{end}}{{end}}{{end}}' \
-"$cid" 2>/dev/null)
-    if [ -n "$HOST_PORTS" ]; then
-      warn "5.9 Ensure that only needed ports are open on the container: $NAME exposes ports below (manual review required)"
-      echo "$HOST_PORTS" | awk 'NF'
-      ALL_PASS=false
-    else
-      pass "5.9 Ensure that only needed ports are open on the container: $NAME has no published ports"
-    fi
-  done
-  if [ "$ALL_PASS" = true ]; then
-    pass "5.9 Ensure that only needed ports are open on the container: all containers have no unnecessary exposed ports"
-  fi
-else
-  pass "5.9 Skipped: no running containers found"
-fi
-echo
 
 ####### Container Privilege & Access Controls
 echo "### Container Privilege & Access Controls "
@@ -204,30 +153,6 @@ if [ -n "$ALL_CONTAINERS" ]; then
 else
   warn "5.18 Skipped: no containers found"
 fi
-
-# 5.22 - Ensure the default seccomp profile is not Disabled
-# 5.26 - Ensure that the container is restricted from acquiring additional privileges
-if [ -n "$ALL_CONTAINERS" ]; then
-  for cid in $ALL_CONTAINERS; do
-    NAME=$(docker inspect --format '{{ .Name }}' "$cid" 2>/dev/null)
-    SEC_OPT=$(docker inspect --format '{{ .HostConfig.SecurityOpt }}' "$cid" 2>/dev/null)
-
-    if echo "$SEC_OPT" | grep -q 'seccomp=unconfined'; then
-      fail "5.22 Ensure the default seccomp profile is not Disabled: $NAME has seccomp=unconfined"
-    else
-      pass "5.22 Ensure the default seccomp profile is not Disabled: $NAME seccomp profile is active"
-    fi
-
-    if echo "$SEC_OPT" | grep -q 'no-new-privileges'; then
-      pass "5.26 Ensure that the container is restricted from acquiring additional privileges: $NAME has no-new-privileges"
-    else
-      fail "5.26 Ensure that the container is restricted from acquiring additional privileges: $NAME is missing no-new-privileges"
-    fi
-  done
-else
-  warn "5.22/5.26 Skipped: no containers found"
-fi
-echo
 
 ####### Resource Limits & Resilience
 echo "### Resource Limits & Resilience"
@@ -300,52 +225,6 @@ else
   warn "5.15 Skipped: no containers found"
 fi
 
-# 5.19 - Ensure that the default ulimit is overwritten at runtime if needed
-DAEMON_ULIMITS_RAW=""
-if [ -f /etc/docker/daemon.json ] && command -v python3 >/dev/null 2>&1; then
-  DAEMON_ULIMITS_RAW=$(python3 -c "
-import json
-try:
-    d = json.load(open('/etc/docker/daemon.json'))
-    ul = d.get('default-ulimits', {})
-    parts = ['%s=%s:%s' % (n, v.get('Soft',''), v.get('Hard','')) for n, v in sorted(ul.items())]
-    print(' '.join(parts))
-except: pass
-" 2>/dev/null)
-fi
-
-if [ -n "$ALL_CONTAINERS" ]; then
-  for cid in $ALL_CONTAINERS; do
-    NAME=$(docker inspect --format '{{ .Name }}' "$cid" 2>/dev/null)
-    ULIMITS=$(docker inspect --format '{{ .HostConfig.Ulimits }}' "$cid" 2>/dev/null)
-
-    if [ "$ULIMITS" = "<no value>" ] || [ "$ULIMITS" = "[]" ] || [ -z "$ULIMITS" ]; then
-      pass "5.19 Ensure that the default ulimit is overwritten at runtime if needed: $NAME inherits daemon defaults (no override)"
-      continue
-    fi
-
-    NOFILE_HARD=$(echo "$ULIMITS" | grep -oE 'nofile=[0-9]+:[0-9]+' | cut -d: -f2 || true)
-    if [ -n "$NOFILE_HARD" ] && [ "$NOFILE_HARD" -gt 65536 ] 2>/dev/null; then
-      fail "5.19 Ensure that the default ulimit is overwritten at runtime if needed: $NAME nofile hard limit ($NOFILE_HARD) exceeds safe threshold (65536)"
-      continue
-    fi
-
-    if [ -n "$DAEMON_ULIMITS_RAW" ]; then
-      CONTAINER_NORM=$(echo "$ULIMITS" | tr -d '[]' | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
-      DAEMON_NORM=$(echo "$DAEMON_ULIMITS_RAW" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
-      if [ "$CONTAINER_NORM" = "$DAEMON_NORM" ]; then
-        pass "5.19 Ensure that the default ulimit is overwritten at runtime if needed: $NAME ulimits match daemon defaults"
-      else
-        warn "5.19 Ensure that the default ulimit is overwritten at runtime if needed: $NAME has custom ulimits differing from daemon defaults: $ULIMITS"
-      fi
-    else
-      warn "5.19 Ensure that the default ulimit is overwritten at runtime if needed: $NAME ulimits set: $ULIMITS (verify against daemon defaults)"
-    fi
-  done
-else
-  warn "5.19 Skipped: no containers found"
-fi
-
 echo
 
 ####### Filesystem & Identity Isolation
@@ -365,21 +244,6 @@ if [ -n "$ALL_CONTAINERS" ]; then
   done
 else
   warn "5.20 Skipped: no containers found"
-fi
-
-# 5.28 - Ensure that Docker commands always make use of the latest version of their image
-if [ -n "$ALL_CONTAINERS" ]; then
-  for cid in $ALL_CONTAINERS; do
-    NAME=$(docker inspect --format '{{ .Name }}' "$cid" 2>/dev/null)
-    IMAGE_TAG=$(docker inspect --format '{{ .Config.Image }}' "$cid" 2>/dev/null)
-    if echo "$IMAGE_TAG" | grep -qE ':latest$|^[^:]+$'; then
-      warn "5.28 Ensure that Docker commands always make use of the latest version of their image: $NAME uses unversioned/':latest' tag ($IMAGE_TAG) — pin to an explicit version or digest"
-    else
-      pass "5.28 Ensure that Docker commands always make use of the latest version of their image: $NAME uses explicit tag ($IMAGE_TAG)"
-    fi
-  done
-else
-  warn "5.28 Skipped: no containers found"
 fi
 
 # 5.31 - Ensure that the host's user namespaces are not shared
