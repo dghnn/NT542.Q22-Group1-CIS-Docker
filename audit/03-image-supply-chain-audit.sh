@@ -50,6 +50,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+#lấy danh sách images, containers
 IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' || true)
 RUNNING_CONTAINERS=$(docker ps -q || true)
 ALL_CONTAINERS=$(docker ps -aq || true)
@@ -85,66 +86,20 @@ else
   warn "4.1 skipped because no image exists"
 fi
 
-# 4.2 Trusted base image
-if [ -n "$IMAGES" ]; then
-  for image in $IMAGES; do
-    if echo "$image" | grep -Eq '^(ubuntu|debian|alpine|nginx|httpd|mysql|postgres|redis|python|node|php|golang|openjdk|busybox):'; then
-      warn "4.2 $image appears to be official/common image, verify trust manually"
-    else
-      warn "4.2 $image must be manually verified as trusted base image"
-    fi
-  done
-else
-  warn "4.2 skipped because no image exists"
-fi
-
-# 4.3 Unnecessary packages
-BAD_PKGS="gcc g++ make git curl wget telnet netcat nc openssh-client vim nano unzip"
+# Kiểm tra UID thực tế của các container đang chạy
 if [ -n "$RUNNING_CONTAINERS" ]; then
-  for cid in $RUNNING_CONTAINERS; do
-    FOUND=0
-
-    for pkg in $BAD_PKGS; do
-      if docker exec "$cid" sh -c "command -v $pkg >/dev/null 2>&1" 2>/dev/null; then
-        echo "[FOUND] Container $cid has package/tool: $pkg"
-        FOUND=1
-      fi
-    done
-
-    if [ "$FOUND" -eq 0 ]; then
-      pass "4.3 Container $cid has no common unnecessary tools detected"
+  for container in $RUNNING_CONTAINERS; do
+    # Lấy UID của tiến trình số 1 bên trong container
+    EFFECTIVE_UID=$(docker exec "$container" cat /proc/1/status | grep '^Uid:' | awk '{print $3}' 2>/dev/null)
+    
+    if [ "$EFFECTIVE_UID" != "0" ] && [ -n "$EFFECTIVE_UID" ]; then
+      pass "4.1 Container $container is running with non-root UID: $EFFECTIVE_UID"
     else
-      fail "4.3 Container $cid contains unnecessary/dev tools"
+      fail "4.1 Container $container is running as root (UID 0)"
     fi
   done
-else
-  warn "4.3 skipped because no running container exists"
 fi
 
-# 4.4 Security updates
-if [ -n "$RUNNING_CONTAINERS" ]; then
-  for cid in $RUNNING_CONTAINERS; do
-    if docker exec "$cid" sh -c "command -v apt-get >/dev/null 2>&1" 2>/dev/null; then
-      OUTDATED=$(docker exec "$cid" sh -c \
-        "apt-get update >/dev/null 2>&1 && apt-get upgrade -s 2>/dev/null | grep '^Inst' | wc -l" \
-        2>/dev/null || echo 0)
-      OUTDATED=${OUTDATED:-0}
-      if [ "$OUTDATED" -eq 0 ]; then
-        pass "4.4 Container $cid has no pending apt package updates"
-      else
-        fail "4.4 Container $cid has $OUTDATED pending package updates"
-      fi
-    elif docker exec "$cid" sh -c "command -v apk >/dev/null 2>&1" 2>/dev/null; then
-      warn "4.4 Container $cid uses apk. Review package updates manually"
-    elif docker exec "$cid" sh -c "command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1" 2>/dev/null; then
-      warn "4.4 Container $cid uses yum/dnf. Review package updates manually"
-    else
-      warn "4.4 Container $cid package manager not detected"
-    fi
-  done
-else
-  warn "4.4 skipped because no running container exists"
-fi
 
 # 4.5 Docker Content Trust
 if [ "$DOCKER_CONTENT_TRUST" = "1" ]; then
@@ -168,30 +123,19 @@ else
   warn "4.6 skipped because no image exists"
 fi
 
-# 4.7 apt-get update alone
-if [ -n "$IMAGES" ]; then
-  for image in $IMAGES; do
-    BAD=$(docker history --no-trunc "$image" 2>/dev/null | grep -Ei 'apt-get update|apt update' | grep -Ev '&&|;|install' | wc -l)
 
-    if [ "$BAD" -eq 0 ]; then
-      pass "4.7 $image has no standalone apt-get update layer"
-    else
-      fail "4.7 $image has standalone apt-get update layer"
-    fi
-  done
-else
-  warn "4.7 skipped because no image exists"
-fi
-
-# 4.8 setuid/setgid
+# 4.8 Ensure setuid and setgid permissions are removed (Level 2 - Manual)
 if [ -n "$ALL_CONTAINERS" ]; then
   for cid in $ALL_CONTAINERS; do
-    SUID_COUNT=$(docker export "$cid" 2>/dev/null | tar -tv 2>/dev/null | grep -E '^[-rwx].*(s|S)' | wc -l)
+    # Sử dụng chính xác Regex từ nguồn tài liệu CIS: [1-6, 10-12] thay vì [1-9]
+    SUID_FILES=$(docker export "$cid" 2>/dev/null | tar -tv 2>/dev/null | grep -E '^[-rwx].*(s|S).*\s[1-6, 10-12]' | awk '{print $NF}')
+    SUID_COUNT=$(echo "$SUID_FILES" | grep -v '^$' | wc -l)
 
     if [ "$SUID_COUNT" -eq 0 ]; then
-      pass "4.8 Container $cid has no SUID/SGID files detected"
+      pass "4.8 Container $cid has no SUID/SGID files"
     else
-      fail "4.8 Container $cid has $SUID_COUNT SUID/SGID files"
+      # CIS yêu cầu "Review the list" để đảm bảo các file đó thực sự cần thiết
+      fail "4.8 Container $cid has $SUID_COUNT SUID/SGID files."
     fi
   done
 else
@@ -213,83 +157,40 @@ else
   warn "4.9 skipped because no image exists"
 fi
 
-# 4.10 No secrets in Dockerfile/history
-SECRET_PATTERNS='PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|AWS_SECRET|MYSQL_ROOT_PASSWORD|POSTGRES_PASSWORD'
 
-if [ -n "$IMAGES" ]; then
-  for image in $IMAGES; do
-    SECRET_FOUND=$(docker history --no-trunc "$image" 2>/dev/null | grep -Ei "$SECRET_PATTERNS" | wc -l)
-
-    if [ "$SECRET_FOUND" -eq 0 ]; then
-      pass "4.10 $image has no obvious secrets in image history"
-    else
-      fail "4.10 $image may contain secrets in image history"
-    fi
-  done
-else
-  warn "4.10 skipped because no image exists"
-fi
-
-# 4.11 Verified packages
-if [ -n "$IMAGES" ]; then
-  for image in $IMAGES; do
-    VERIFY_FOUND=$(docker history --no-trunc "$image" 2>/dev/null | grep -Ei 'gpg|sha256sum|apt-key|signed-by|cosign' | wc -l)
-
-    if [ "$VERIFY_FOUND" -gt 0 ]; then
-      warn "4.11 $image shows package/signature verification evidence, review manually"
-    else
-      warn "4.11 $image has no obvious package verification evidence"
-    fi
-  done
-else
-  warn "4.11 skipped because no image exists"
-fi
-
-# 4.12 Signed artifacts validation
-if [ -n "$IMAGES" ]; then
-  for image in $IMAGES; do
-    ARTIFACT_VERIFY=$(docker history --no-trunc "$image" 2>/dev/null | grep -Ei 'gpg --verify|sha256sum -c|cosign verify' | wc -l)
-
-    if [ "$ARTIFACT_VERIFY" -gt 0 ]; then
-      warn "4.12 $image shows signed artifact validation evidence, review manually"
-    else
-      warn "4.12 $image has no obvious signed artifact validation evidence"
-    fi
-  done
-else
-  warn "4.12 skipped because no image exists"
-fi
-
-# 2.10 User namespace
-if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'userns'; then
+# 2.10 Enable user namespace support (Level 2)
+# Kiểm tra userns trong Security Options theo Audit Procedure [1]
+if docker info --format '{{ .SecurityOptions }}' 2>/dev/null | grep -q 'userns'; then
   pass "2.10 User namespace support is enabled"
 else
   fail "2.10 User namespace support is not enabled"
 fi
 
-# 2.13 Authorization plugin
-AUTH_PLUGIN=$(docker info --format '{{json .Plugins.Authorization}}' 2>/dev/null)
+# 2.13 Ensure that authorization for Docker client commands is enabled (Level 2)
+# Kiểm tra đồng thời cả tham số dòng lệnh và file config daemon.json [3, 4]
+AUTH_FLAG=$(ps -ef | grep dockerd | grep -v grep | grep -c "authorization-plugin" || echo 0)
+AUTH_JSON=$(grep -E "authorization-plugin|authorization-plugins" /etc/docker/daemon.json 2>/dev/null | grep -c ":" || echo 0)
 
-if [ "$AUTH_PLUGIN" = "[]" ] || [ "$AUTH_PLUGIN" = "null" ] || [ -z "$AUTH_PLUGIN" ]; then
-  warn "2.13 No Docker authorization plugin configured, verify policy manually"
+if [ "$AUTH_FLAG" -gt 0 ] || [ "$AUTH_JSON" -gt 0 ]; then
+  pass "2.13 Authorization plugin is configured"
 else
-  pass "2.13 Authorization plugin is configured: $AUTH_PLUGIN"
+  # Rationale: Mô hình mặc định 'all or nothing' rất nguy hiểm [5]
+  fail "2.13 No Docker authorization plugin configured in daemon settings"
 fi
 
-# 2.15 no-new-privileges
-if [ -n "$ALL_CONTAINERS" ]; then
-  for cid in $ALL_CONTAINERS; do
-    NNP=$(docker inspect --format='{{json .HostConfig.SecurityOpt}}' "$cid" 2>/dev/null | grep -c 'no-new-privileges')
+# 2.15 Ensure containers are restricted from acquiring new privileges (Level 1)
+# Kiểm tra trong tệp daemon.json hoặc tham số dòng lệnh của dockerd [6]
+# Sử dụng -e để xử lý chuỗi bắt đầu bằng dấu gạch ngang và đảm bảo giá trị mặc định là 0
+NNP_DAEMON_JSON=$(grep "no-new-privileges" /etc/docker/daemon.json 2>/dev/null | grep -c "true" || echo 0)
+NNP_DAEMON_FLAG=$(ps -ef | grep dockerd | grep -v grep | grep -c -e "--no-new-privileges" || echo 0)
 
-    if [ "$NNP" -gt 0 ]; then
-      pass "2.15 Container $cid has no-new-privileges enabled"
-    else
-      fail "2.15 Container $cid does not have no-new-privileges"
-    fi
-  done
+if [ "$NNP_DAEMON_JSON" -gt 0 ] || [ "$NNP_DAEMON_FLAG" -gt 0 ]; then
+  pass "2.15 Docker daemon is configured to restrict new privileges by default"
 else
-  warn "2.15 skipped because no container exists"
+  # Rationale: Giảm thiểu rủi ro từ các bản sao đặc quyền nguy hiểm [7]
+  fail "2.15 Docker daemon is NOT configured with --no-new-privileges"
 fi
+
 
 # 2.18 Seccomp
 if [ -n "$ALL_CONTAINERS" ]; then
